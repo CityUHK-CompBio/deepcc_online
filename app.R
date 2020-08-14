@@ -1,25 +1,65 @@
 # DeepCC web interface
 library(shiny)
+library(shinymanager)
 library(DT)
-library(mxnet)
+library(keras)
 library(DeepCC)
 library(ggplot2)
 library(cowplot)
 library(org.Hs.eg.db)
 library(shinythemes)
 
+
+inactivity <- "function idleTimer() {
+var t = setTimeout(logout, 120000);
+window.onmousemove = resetTimer; // catches mouse movements
+window.onmousedown = resetTimer; // catches mouse movements
+window.onclick = resetTimer;     // catches mouse clicks
+window.onscroll = resetTimer;    // catches scrolling
+window.onkeypress = resetTimer;  //catches keyboard actions
+
+function logout() {
+window.close();  //close the window
+}
+
+function resetTimer() {
+clearTimeout(t);
+t = setTimeout(logout, 120000);  // time is in milliseconds (1000 is 1 second)
+}
+}
+idleTimer();"
+
+
+# data.frame with credentials info
+credentials <- data.frame(
+  user = c("lee", "leech", "victor", "benoit"),
+  password = c("12070219", "leech", "12345", "azerty"),
+  # comment = c("alsace", "auvergne", "bretagne"), %>% 
+  stringsAsFactors = FALSE
+)
+
 cancer_type <- c("CRC", "Breast Cancer", "Ovarian Cancer", "Gastric Cancer")#list.files("data")
 
-if (!exists("models")) {
-  load("models.RData")
-}
+# if (!exists("models")) {
+#   load("models_.RData")
+# }
 
-init <- function(x) {
-  load("models.RData")
-}
+ init <- function(x) {
+   CRC_TCGA <- load_DeepCC_model("models/CRC_TCGA")
+   CRC_All <- load_DeepCC_model("models/CRC_All")
+   CRC <- list(TCGA = CRC_TCGA, All = CRC_All)
+   BRC_TCGA <- load_DeepCC_model("models/BRC_TCGA")
+   BRC <- list(TCGA = BRC_TCGA)
+   OVC_MAYO <- load_DeepCC_model("models/OVC_MAYO")
+   OVC <- list(MAYO = OVC_MAYO)
+   GC_ACRG <- load_DeepCC_model("models/GC_ACRG")
+   GC <- list(ACRG = GC_ACRG)
+   model <- list(CRC = CRC, "Breast Cancer" = BRC, "Ovarian Cancer" = OVC, "Gastric Cancer" = GC)
+   models <<- model
+ }
 
 # Define UI for application
-ui <- tagList(
+ui <- secure_app(head_auth = tags$script(inactivity), tagList(
   navbarPage(
     theme = shinytheme("flatly"),  # <--- To use a theme, uncomment this
     "DeepCC Online",
@@ -45,6 +85,11 @@ ui <- tagList(
                #selectInput(inputId = "ref_cancer", label = "Pre-defined reference", choices = c("COADREAD", "BRCA", "OV"), selected = "COADREAD"),
                checkboxInput(inputId = "two_color_status", label = "Two color array", value = FALSE),
                actionButton("calc_fs", "Calculate Functional Sepctra", class = "btn-primary"),
+               #textInput("text", label = "Enter file name to download fs with RDS form", value = ""),
+               radioButtons("filetype", "functional spectra type for download:", choices = c(CSV="csv", TXT="txt")),
+               downloadButton("download_fps", "Download Functional Spectra", class = "btn-primary"),
+               
+
 
                tags$hr(),
                tags$h4("Step 2: Cancer subtype classification"),
@@ -53,7 +98,9 @@ ui <- tagList(
                selectInput(inputId = "dataset", label="Select functional spectra" ,choices = c("Uploaded"), selected = "Uploaded"),
                sliderInput("cutoff", "Set the cutoff on posterior probability:", 0, 1, 0.5),
 
-               actionButton("predition", "Predict", class = "btn-primary")
+               actionButton("predition", "Predict", class = "btn-primary"),
+               tags$hr(),
+               actionButton("df", "Calculate Deep Feature", class = "btn-primary")
 
              ),
              mainPanel(
@@ -100,9 +147,18 @@ ui <- tagList(
                text-align: left;position:absolute;top: 30%;left: 45%;margin-top: -100px;margin-left: -150px;}
                #login_busyx {position:fixed;top: 50%;left: 60%;margin-top: -100px;margin-left: -150px;}")
 )
+)
 
 # Define server logic
 server <- function(input, output, session) {
+  
+  result_auth <- secure_server(check_credentials = check_credentials(credentials))
+  
+  output$res_auth <- renderPrint({
+    reactiveValuesToList(result_auth)
+  })
+  
+  options(shiny.maxRequestSize=300*1024^2)
   gc()
   data_upload <- list()
   output$calc_status <- renderText("Waiting for uploading data...")
@@ -181,7 +237,7 @@ server <- function(input, output, session) {
       if(mean(annotate::isValidKey(colnames(data_upload$eps), "org.Hs.eg")) > 0.5) {
         data_upload$eps <<- data.matrix(data_upload$eps)
 
-        if(nrow(data_upload$eps) > 1) data_upload$fps <<- getFunctionalSpectra(eps=data_upload$eps, geneSets = "MSigDBv6", cores=10)
+        if(nrow(data_upload$eps) > 1) data_upload$fps <<- getFunctionalSpectra(eps=data_upload$eps, geneSets = "MSigDBv7", cores=10)
 
         if(nrow(data_upload$eps) == 1) {
           if(input$cancer == "CRC") ref_cancer <- "COADREAD"
@@ -194,7 +250,7 @@ server <- function(input, output, session) {
 
           data_upload$eps <<- (data_upload$eps[1, ])
           data_upload$fps <<- getFunctionalSpectrum(data_upload$eps,
-                                                    geneSets = "MSigDBv6",
+                                                    geneSets = "MSigDBv7",
                                                     refExp = ref_cancer,
                                                     logChange = input$two_color_status,
                                                     inverseRescale = T)
@@ -202,9 +258,10 @@ server <- function(input, output, session) {
           data_upload$fps <<- t(data.frame(data_upload$fps))
           rownames(data_upload$fps) <<- name
         }
-
+        
         output$calc_status <- renderText(paste("Finished calculation of functional spectra, there are", nrow(data_upload$fps), "sample(s) including", ncol(data_upload$fps), "features."))
-
+        
+        
       } else {
         showModal(modalDialog(
           title = "Error!",
@@ -223,6 +280,20 @@ server <- function(input, output, session) {
     })
 
   })
+  output$download_fps <- downloadHandler(
+    filename = function(){
+      paste0(gsub(".csv", "", input$eps), "_", Sys.Date(), "_fps.", input$filetype)
+    },
+    content = function(file){
+      if(input$filetype == "csv"){
+        write.csv(data_upload$fps, file, row.names = F, quote = F)
+      } else {
+        write.table(data_upload$fps, file, sep = "\t", row.names = F, quote = F)
+      }
+    }
+  )
+  
+
 
   observeEvent(input$cancer, {
     datasets <- gsub(".RData", "", list.files(file.path("data", input$cancer), pattern = "*.RData"))
@@ -251,7 +322,7 @@ server <- function(input, output, session) {
     }
 
     if(!is.null(data$fps)) {
-      pred <- getDeepCCLabels(model, data$fps, cutoff = input$cutoff, prob.mode=T)
+      pred <- get_DeepCC_label(model, data$fps, cutoff = input$cutoff, prob_mode=T)
       # pred[, 1] <- as.character(pred[, 1])
       dt <- data.frame(`Sample ID`=rownames(data$fps), pred, check.names = F)
 
@@ -270,6 +341,41 @@ server <- function(input, output, session) {
     }
 
     incProgress(1, detail = paste("Finished."))
+    })
+  })
+  
+
+  
+  observeEvent(input$df, {
+    withProgress(message = "Calculating Deep Features...", detail = "waiting...", value = 0, {
+      
+      model <- models[[input$cancer]][[input$model]]
+      if(input$dataset == "Uploaded") {
+        data <- data_upload
+      } else {
+        data <- readRDS(file.path("data", input$cancer, paste0(input$dataset, ".RData")))
+      }
+      
+      if(!is.null(data$fps)) {
+        df <- get_DeepCC_features(model, data$fps)
+        
+        dt <- data.frame(`Sample ID`=rownames(df), df, check.names = F, row.names = NULL)
+        
+        dt <- datatable(dt, extensions = 'Buttons', options = list(paging = F,
+                                                                   dom = 'Bfrtip',
+                                                                   buttons = c('copy', 'csv', 'excel', 'pdf', 'print')
+        ))
+        
+        output$calc_status <- renderText("Deep Features:")
+        output$pred_output <- renderDataTable(dt %>% formatRound(columns = c(2:11), digits = 5))
+      }else {
+        showModal(modalDialog(
+          title = "Error!",
+          "No functional spectra exists!"
+        ))
+      }
+      
+      incProgress(1, detail = paste("Finished."))
     })
   })
 
